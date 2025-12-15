@@ -1,5 +1,5 @@
 {
-  "name": "alex-human-like-chatbot",
+  "name": "ChatBotV1_Refined",
   "version": "1.0.0",
   "description": "A human-like Facebook Messenger bot using fca-unofficial and Gemini's advanced reasoning.",
   "main": "index.js",
@@ -10,7 +10,6 @@
     "facebook",
     "chatbot",
     "gemini",
-    "fca-unofficial",
     "node"
   ],
   "author": "Gerald Max, Google Gemini",
@@ -18,7 +17,7 @@
   "dependencies": {
     "@google/genai": "^1.0.0",
     "dotenv": "^16.4.5",
-    "fca-unofficial": "^1.3.10",
+    "ws3-fca": "^3.5.2",
     "fs": "0.0.1-security"
   }
 }
