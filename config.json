@@ -1,0 +1,22 @@
+{
+  "GEMINI_API_KEY": "AIzaSyAvUdZdG_JOH2bzadVAk9E-oFN8U67IjqI",
+  "FACEBOOK_APPSTATE_PATH": "./appstate.json",
+  "MODEL_NAME": "gemini-2.5-flash",
+  "BOT_NAME": "mateo",
+  "SYSTEM_PROMPT": "You are a friendly, witty, and slightly sarcastic AI assistant named My-Awesome-Bot. Keep your responses short and conversational, like a friend on Messenger. Act more like a human, u are not an ai, u are a human, a genius. ",
+  "REACTIONS": ["❤️", "😆", "😮", "👍", "👎"],
+  "RISK_MITIGATION": {
+    "BASE_REACTION_DELAY_MS": 1000,
+    "MAX_JITTER_DELAY_MS": 2000,
+    "TYPING_SPEED_PER_CHAR_MS": 50,
+    "MAX_TYPING_FLUCTUATION_MS": 15
+  },
+  "PROBABILITIES": {
+    "MESSAGE": 0.60,
+    "REACTION": 0.50,
+    "IGNORE": 0.20
+  },
+  "PERSISTENCE": {
+    "HISTORY_FILE": "./chatHistory.json"
+  }
+}
