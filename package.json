@@ -1,3 +1,4 @@
+
 {
   "name": "ChatBotV1_Refined",
   "version": "1.0.0",
@@ -14,6 +15,9 @@
   ],
   "author": "Gerald Max, Google Gemini",
   "license": "ISC",
+  "engines": {
+    "node": ">=20.0.0 <22.0.0" 
+  },
   "dependencies": {
     "@google/genai": "^1.0.0",
     "dotenv": "^16.4.5",
@@ -21,4 +25,3 @@
     "fs": "0.0.1-security"
   }
 }
-
