@@ -17,7 +17,7 @@
   "dependencies": {
     "@google/genai": "^1.0.0",
     "dotenv": "^16.4.5",
-    "ws3-fca": "^3.5.2",
+    "fca-priyansh": "latest",
     "fs": "0.0.1-security"
   }
 }
