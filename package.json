@@ -21,7 +21,7 @@
   "dependencies": {
     "@google/genai": "^1.0.0",
     "dotenv": "^16.4.5",
-    "fca-priyansh": "latest",
+    "@dongdev/fca-unofficial": "latest",
     "fs": "0.0.1-security"
   }
 }
