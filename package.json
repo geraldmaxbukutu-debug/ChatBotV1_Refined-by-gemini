@@ -1,4 +1,3 @@
-
 {
   "name": "ChatBotV1_Refined",
   "version": "1.0.0",
@@ -21,6 +20,7 @@
   "dependencies": {
     "@google/genai": "^1.0.0",
     "dotenv": "^16.4.5", 
+    "@Donix-VN/fca-unofficial": "^3.0.17", 
     "fs": "0.0.1-security"
   }
 }
