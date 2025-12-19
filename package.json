@@ -20,7 +20,7 @@
   "dependencies": {
     "@google/genai": "^1.0.0",
     "dotenv": "^16.4.5", 
-    "@geraldmaxbukutu-debug/fca-unofficial": "^3.0.17", 
+    "@dongdev/fca-unofficial": "^3.0.17", 
     "fs": "0.0.1-security"
   }
 }
