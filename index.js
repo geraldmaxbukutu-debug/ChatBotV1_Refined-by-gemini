@@ -1,11 +1,12 @@
-const fs = require('fs');
-const { GoogleGenAI } = require('@google/genai');
-const dotenv = require('dotenv');
-const { login } = require("@dongdev/fca-unofficial"); 
+// index.js// index.js
+const fs = require("fs");
+const path = require("path");
+const { GoogleGenerativeAI: GoogleGenAI } = require("@google/generative-ai");
+require("dotenv").config();
+const login = require("@dongdev/fca-unofficial");
+const async = require('async');
+const express = require('express'); // Added Express
 
-dotenv.config();
-
-// --- Configuration Loading ---
 let config;
 try {
     const configData = fs.readFileSync('./config.json', 'utf8');
@@ -16,141 +17,256 @@ try {
     process.exit(1);
 }
 
-// Map config properties for cleaner access
-const { 
-    GEMINI_API_KEY, 
-    FACEBOOK_APPSTATE_PATH, 
-    MODEL_NAME, 
-    BOT_NAME, 
-    SYSTEM_PROMPT, 
-    REACTIONS, 
-    RISK_MITIGATION, 
+const {
+    GEMINI_API_KEY,
+    FACEBOOK_APPSTATE_PATH,
+    MODEL_NAME,
+    BOT_NAME,
+    SYSTEM_PROMPT,
+    REACTIONS,
+    RISK_MITIGATION,
     PROBABILITIES,
-    PERSISTENCE 
+    PERSISTENCE,
+    SERVER // Added SERVER config access
 } = config;
 
-// Initialize the Gemini Client
-const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY }); 
+const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+const chatSessions = {};
+let persistedHistory = {};
 
-// Stores live chat sessions (Gemini objects)
-const chatSessions = {}; 
-// Stores raw chat history for persistence (key: threadID, value: Gemini history array)
-let persistedHistory = {}; 
-
-
-// ====================================================================
-// === CORE BOT LOGIC FUNCTIONS =======================================
-// ====================================================================
-
-// --- PERSISTENCE FUNCTIONS ---
 function loadHistory() {
-    try {
-        if (fs.existsSync(PERSISTENCE.HISTORY_FILE)) {
-            const data = fs.readFileSync(PERSISTENCE.HISTORY_FILE, 'utf8');
+    if (PERSISTENCE.ENABLED && fs.existsSync(PERSISTENCE.HISTORY_FILE_PATH)) {
+        try {
+            const data = fs.readFileSync(PERSISTENCE.HISTORY_FILE_PATH, 'utf8');
             persistedHistory = JSON.parse(data);
-            console.log(`Successfully loaded ${Object.keys(persistedHistory).length} threads from history file.`);
-        } else {
-            console.log("No history file found. Starting fresh.");
+            console.log("Chat history loaded from file.");
+        } catch (err) {
+            console.error("Error loading chat history, starting fresh:", err);
+            persistedHistory = {};
         }
-    } catch (e) {
-        console.error("Error loading history:", e);
     }
 }
 
 function saveHistory() {
-    try {
-        fs.writeFileSync(PERSISTENCE.HISTORY_FILE, JSON.stringify(persistedHistory, null, 2), 'utf8');
-    } catch (e) {
-        console.error("Error saving history:", e);
+    if (PERSISTENCE.ENABLED) {
+        try {
+            fs.writeFileSync(PERSISTENCE.HISTORY_FILE_PATH, JSON.stringify(persistedHistory, null, 2));
+        } catch (err) {
+            console.error("Error saving chat history:", err);
+        }
     }
 }
 
-// --- GEMINI CHAT MANAGEMENT FUNCTION ---
 async function getChatSession(threadID) {
     if (!chatSessions[threadID]) {
-        const history = persistedHistory[threadID] || [];
-        const chat = ai.chats.create({
-            model: MODEL_NAME,
-            config: { systemInstruction: SYSTEM_PROMPT },
-            history: history
+        const model = ai.getGenerativeModel({ model: MODEL_NAME });
+        const chat = model.startChat({
+            history: persistedHistory[threadID] || [],
+            generationConfig: { maxOutputTokens: 1000 }
         });
         chatSessions[threadID] = chat;
     }
     return chatSessions[threadID];
 }
 
-
-// --- REASONING AND DECISION FUNCTIONS ---
-
-// Smart Filter: Uses Gemini to determine if a message warrants a reply
-async function shouldBotReply(message, threadID) {
-    const chat = await getChatSession(threadID);
-    const context = await chat.getHistory();
-    const lastFewMessages = context.slice(-3).map(m => m.parts[0].text).join('\n');
-    
-    // Create a temporary chat for a quick decision
-    const decisionChat = ai.chats.create({
-        model: MODEL_NAME,
-        config: {
-            systemInstruction: `You are a conversational filter for a human named '${BOT_NAME}'. 
-            Analyze the following message and the recent chat history (if available). 
-            If the message is a direct question, a comment clearly about '${BOT_NAME}', or a natural follow-up to a previous reply by '${BOT_NAME}', respond with ONLY the word "YES". 
-            Otherwise, respond with ONLY the word "NO". DO NOT add any other text or explanation.`,
-        }
-    });
-
-    const prompt = `Recent context:\n---\n${lastFewMessages}\n---\nNew message to check: "${message}"`;
-    const response = await decisionChat.sendMessage({ message: prompt });
-    
-    return response.text.trim().toUpperCase().includes('YES');
+async function shouldBotReply(messageContent, threadID) {
+    try {
+        const filterPrompt = `${SYSTEM_PROMPT}\n\nHuman Message:\n${messageContent}\n\nShould the AI reply directly (Yes/No)?`;
+        const filterModel = ai.getGenerativeModel({ model: "gemini-1.5-flash-latest" });
+        const filterResult = await filterModel.generateContent(filterPrompt);
+        const filterText = (await filterResult.response.text()).trim().toLowerCase();
+        return filterText.includes("yes");
+    } catch (error) {
+        console.error(`[Reasoning Error] Thread ${threadID}:`, error);
+        return false;
+    }
 }
 
-// Randomly determines if the bot should MESSAGE, REACT, or IGNORE
 function getReplyAction() {
-    const r = Math.random();
-    let cumulative = 0;
-    
-    cumulative += PROBABILITIES.MESSAGE;
-    if (r < cumulative) return 'MESSAGE';
-    
-    cumulative += PROBABILITIES.REACTION;
-    if (r < cumulative) return 'REACTION';
-
+    const rand = Math.random();
+    if (rand < PROBABILITIES.REPLY) return 'MESSAGE';
+    if (rand < PROBABILITIES.REPLY + PROBABILITIES.REACT) return 'REACTION';
     return 'IGNORE';
 }
 
-// --- MESSAGE SENDING FUNCTIONS ---
-
-// Handles message sending and includes user tagging logic
-function sendTaggedMessage(api, message, threadID, tagUserID = null, tagUserName = 'User') {
-    let msg = {
+function sendTaggedMessage(api, message, threadID, senderID, senderName) {
+    const tagMessage = {
         body: message,
-        mentions: []
+        mentions: [{ tag: `@${senderName}`, id: senderID }]
     };
-
-    if (tagUserID) {
-        // Tag needs to be placed in the body
-        const tagText = `@${tagUserName}`;
-        msg.body = `${tagText} ${message}`;
-        
-        msg.mentions.push({
-            tag: tagText,
-            id: tagUserID,
-            fromIndex: 0 // Tag starts at the beginning
-        });
-    }
-
-    api.sendMessage(msg, threadID, (err) => {
-        if (err) console.error("Error sending message:", err);
+    api.sendMessage(tagMessage, threadID, (err, msgInfo) => {
+        if (err) {
+            console.error(`[Error] Failed to send tagged message in thread ${threadID}:`, err);
+        } else {
+            console.log(`[Bot Reply] Sent TAGGED message (ID: ${msgInfo?.messageID}) to ${senderName} in thread ${threadID}.`);
+        }
     });
 }
 
+const threadQueues = new Map();
 
-// ====================================================================
-// === MAIN EXECUTION BLOCK ===========================================
-// ====================================================================
+function getThreadQueue(threadID) {
+    if (!threadQueues.has(threadID)) {
+        const q = async.queue(async function(event, callback) {
+            try {
+                 await processMessage(api, event);
+            } catch (error) {
+                console.error(`[Queue Worker Error - Thread ${threadID}]:`, error);
+            } finally {
+                 callback();
+            }
+        }, 1);
+        threadQueues.set(threadID, q);
+        console.log(`[Queue Manager] Created new queue for thread ${threadID}.`);
+    }
+    return threadQueues.get(threadID);
+}
 
-// --- INITIALIZATION ---
+async function processMessage(api, event) {
+    if (event.type === "message" && event.senderID !== api.getCurrentUserID()) {
+        const userMessage = event.body;
+        const threadID = event.threadID;
+        const messageID = event.messageID;
+        const senderID = event.senderID;
+        const senderName = event.senderName || 'Friend';
+
+        console.log(`[Processing] New message in thread ${threadID} from ${senderID}. Queue length: ${getThreadQueue(threadID).length() + (getThreadQueue(threadID).running() ? 1 : 0) }`);
+
+        if (userMessage.toLowerCase() === '!history reset' && threadID === senderID) {
+            if (chatSessions[threadID]) {
+                delete chatSessions[threadID];
+                delete persistedHistory[threadID];
+                saveHistory();
+                api.sendMessage("Memory for this chat wiped. Starting fresh! ✨", threadID);
+                console.log(`[Admin] Chat history for ${threadID} reset and saved.`);
+            } else {
+                api.sendMessage("Memory already clear, chief. You're good to go!", threadID);
+            }
+            return;
+        }
+
+        const chat = await getChatSession(threadID);
+
+        let attachmentDescription = "";
+        let fullUserMessage = userMessage || "";
+        const hasAttachment = event.attachments && event.attachments.length > 0;
+
+        if (hasAttachment) {
+            const attachment = event.attachments[0];
+            switch (attachment.type) {
+                case "photo":
+                case "video":
+                    const caption = attachment.caption ? ` with the caption: "${attachment.caption}"` : "";
+                    attachmentDescription = ` (The user also sent a ${attachment.type}${caption}. Respond to the media naturally.)`;
+                    break;
+                case "file":
+                case "audio":
+                    attachmentDescription = ` (The user sent a voice clip or file named: ${attachment.name}. Acknowledge it.)`;
+                    break;
+                case "sticker":
+                    attachmentDescription = ` (The user sent a sticker. React to the sticker's mood, which is generally fun/casual.)`;
+                    if (!fullUserMessage) fullUserMessage = "They sent a sticker.";
+                    break;
+                case "share":
+                    attachmentDescription = ` (The user shared a link titled: ${attachment.title || 'Link'}. Address the link briefly.)`;
+                    break;
+                default:
+                    attachmentDescription = " (The user sent an unrecognized media attachment.)";
+            }
+            console.log(`[Attachment] Detected type: ${attachment.type}`);
+        }
+
+        let shouldProceed = false;
+        const reasoningMessage = fullUserMessage + (hasAttachment ? attachmentDescription : "");
+
+        try {
+            const isExplicitlyAddressed = fullUserMessage.toLowerCase().includes(BOT_NAME);
+            if (isExplicitlyAddressed || hasAttachment) {
+                shouldProceed = true;
+            } else {
+                shouldProceed = await shouldBotReply(reasoningMessage, threadID);
+            }
+        } catch (e) {
+            console.error("Reasoning Filter Error:", e);
+            shouldProceed = false;
+        }
+
+        if (shouldProceed) {
+            const reactionDelay = RISK_MITIGATION.BASE_REACTION_DELAY_MS + Math.random() * RISK_MITIGATION.MAX_JITTER_DELAY_MS;
+            await new Promise(r => setTimeout(r, reactionDelay));
+
+            const action = getReplyAction();
+
+            if (action === 'REACTION') {
+                const randomReaction = REACTIONS[Math.floor(Math.random() * REACTIONS.length)];
+                try {
+                    api.setMessageReaction(randomReaction, messageID, false, (e) => {
+                        if (e) console.error("Error setting reaction:", e);
+                        else console.log(`[Bot Action] Reacted with ${randomReaction} to message ${messageID} in thread ${threadID}.`);
+                    });
+                    await chat.sendMessage({ message: fullUserMessage + attachmentDescription });
+                    persistedHistory[threadID] = await chat.getHistory();
+                    saveHistory();
+                } catch (e) { console.error("Reaction failed:", e); }
+                return;
+            }
+
+            if (action === 'MESSAGE') {
+                const messageToSendToAI = (fullUserMessage || "The user sent media.") + attachmentDescription;
+
+                try {
+                    const typingStartDelay = Math.random() * 1000;
+                    const typingPromise = new Promise(async (resolve) => {
+                        await new Promise(r => setTimeout(r, typingStartDelay));
+                        api.sendTypingIndicator(threadID, (e) => { if (e) console.error(e); });
+                        resolve();
+                    });
+
+                    const aiCallPromise = chat.sendMessage({ message: messageToSendToAI });
+                    const [_, response] = await Promise.all([typingPromise, aiCallPromise]);
+                    const aiReply = response.text.trim();
+
+                    const typingTime = aiReply.length * RISK_MITIGATION.TYPING_SPEED_PER_CHAR_MS + Math.random() * (aiReply.length * RISK_MITIGATION.MAX_TYPING_FLUCTUATION_MS);
+                    await new Promise(r => setTimeout(r, typingTime));
+
+                    const shouldTag = Math.random() < 0.1 || threadID !== senderID;
+
+                    if (shouldTag) {
+                        sendTaggedMessage(api, aiReply, threadID, senderID, senderName);
+                        console.log(`[Bot Reply] Sent and TAGGED ${senderName} in thread ${threadID}. AI Reply: ${aiReply.substring(0, 50)}...`);
+                    } else {
+                        api.sendMessage(aiReply, threadID, (err, msgInfo) => {
+                             if (err) {
+                                console.error(`[Error] Failed to send message in thread ${threadID}:`, err);
+                             } else {
+                                console.log(`[Bot Reply] Sent standard message (ID: ${msgInfo?.messageID}) in thread ${threadID}. AI Reply: ${aiReply.substring(0, 50)}...`);
+                             }
+                        });
+                    }
+
+                    persistedHistory[threadID] = await chat.getHistory();
+                    saveHistory();
+
+                } catch (aiError) {
+                    console.error("Gemini API Error:", aiError);
+                    api.sendMessage("Ugh, my internet is glitching rn. Totes can't connect!", threadID);
+                }
+            }
+
+            if (action === 'IGNORE') {
+                console.log(`[Bot Action] Ignored message in thread ${threadID} (Simulating human pause/disinterest).`);
+                await chat.sendMessage({ message: fullUserMessage + attachmentDescription });
+                persistedHistory[threadID] = await chat.getHistory();
+                saveHistory();
+            }
+
+        } else {
+            console.log(`[Ignored] Message in thread ${threadID} not about ${BOT_NAME} or direct, skipping.`);
+        }
+        console.log(`[Processing Done] Finished message in thread ${threadID}. Queue length: ${getThreadQueue(threadID).length()}`);
+    }
+}
+
 loadHistory();
 
 let appState;
@@ -161,167 +277,39 @@ try {
     process.exit(1);
 }
 
-
-// 2. Main Login and Listener
 login({ appState: appState }, (err, api) => {
     if (err) return console.error("Facebook Login Failed:", err);
 
-    api.setOptions({ listenEvents: true, selfListen: false, online: true }); 
+    api.setOptions({ listenEvents: true, selfListen: false, online: true });
     console.log(`Facebook Bot (${MODEL_NAME}) is online and configured as '${BOT_NAME}'.`);
+
+    // --- START EXPRESS SERVER TO USE CONFIGURED PORT ---
+    const app = express();
+    const configuredPort = SERVER.PORT || 3000; // Default to 3000 if not set
+
+    app.get('/', (req, res) => {
+        res.send(`Facebook Bot (${MODEL_NAME}) is active on port ${configuredPort}.`);
+    });
+
+    app.listen(configuredPort, () => {
+        console.log(`[Server] Listening on port ${configuredPort}. This port is reserved for the application.`);
+    });
+    // --- END EXPRESS SERVER ---
 
     api.listenMqtt(async (err, event) => {
         if (err) return console.error("Listen Error:", err);
 
-        if (event.type === "message" && event.senderID !== api.getCurrentUserID()) {
-            const userMessage = event.body;
-            const threadID = event.threadID;
-            const messageID = event.messageID; 
-            const senderID = event.senderID;
-            const senderName = event.senderName || 'Friend';
-
-            // --- ADMIN COMMAND CHECK ---
-            if (userMessage.toLowerCase() === '!history reset' && threadID === senderID) { 
-                if (chatSessions[threadID]) {
-                    delete chatSessions[threadID];
-                    delete persistedHistory[threadID];
-                    saveHistory(); 
-                    api.sendMessage("Memory for this chat wiped. Starting fresh! ✨", threadID);
-                    console.log(`[Admin] Chat history for ${threadID} reset and saved.`);
-                } else {
-                    api.sendMessage("Memory already clear, chief. You're good to go!", threadID);
-                }
-                return; 
-            }
-            // --- END ADMIN COMMAND CHECK ---
-
-            // 1. Get/Initialize Chat Session 
-            const chat = await getChatSession(threadID);
-
-            // --- ATTACHMENT PROCESSING ---
-            let attachmentDescription = "";
-            let fullUserMessage = userMessage || ""; 
-            const hasAttachment = event.attachments && event.attachments.length > 0;
-            
-            if (hasAttachment) {
-                const attachment = event.attachments[0]; 
-
-                switch (attachment.type) {
-                    case "photo":
-                    case "video":
-                        const caption = attachment.caption ? ` with the caption: "${attachment.caption}"` : "";
-                        attachmentDescription = ` (The user also sent a ${attachment.type}${caption}. Respond to the media naturally.)`;
-                        break;
-                    case "file":
-                    case "audio":
-                        attachmentDescription = ` (The user sent a voice clip or file named: ${attachment.name}. Acknowledge it.)`;
-                        break;
-                    case "sticker":
-                        attachmentDescription = ` (The user sent a sticker. React to the sticker's mood, which is generally fun/casual.)`;
-                        if (!fullUserMessage) fullUserMessage = "They sent a sticker.";
-                        break;
-                    case "share": 
-                        attachmentDescription = ` (The user shared a link titled: ${attachment.title || 'Link'}. Address the link briefly.)`;
-                        break;
-                    default:
-                        attachmentDescription = " (The user sent an unrecognized media attachment.)";
-                }
-                console.log(`[Attachment] Detected type: ${attachment.type}`);
-            }
-
-            // --- STEP 2: REASONING FILTER ---
-            let shouldProceed = false;
-            const reasoningMessage = fullUserMessage + (hasAttachment ? attachmentDescription : "");
-
-            try {
-                const isExplicitlyAddressed = fullUserMessage.toLowerCase().includes(BOT_NAME);
-                if (isExplicitlyAddressed || hasAttachment) { 
-                    shouldProceed = true;
-                } else {
-                    shouldProceed = await shouldBotReply(reasoningMessage, threadID);
-                }
-            } catch (e) {
-                console.error("Reasoning Filter Error:", e);
-                shouldProceed = false; 
-            }
-            
-            if (shouldProceed) {
-                
-                // 3. Start Human Reaction Delay
-                const reactionDelay = RISK_MITIGATION.BASE_REACTION_DELAY_MS + Math.random() * RISK_MITIGATION.MAX_JITTER_DELAY_MS;
-                await new Promise(r => setTimeout(r, reactionDelay));
-                
-                const action = getReplyAction(); 
-                
-                // --- EXECUTE ACTION ---
-                
-                if (action === 'REACTION') {
-                    const randomReaction = REACTIONS[Math.floor(Math.random() * REACTIONS.length)];
-                    
-                    try {
-                        api.setMessageReaction(randomReaction, messageID, false, (e) => {
-                            if (e) console.error("Error setting reaction:", e);
-                        });
-                        // Update persistence: Log user message and bot action
-                        await chat.sendMessage({ message: fullUserMessage + attachmentDescription });
-                        persistedHistory[threadID] = await chat.getHistory();
-                        saveHistory();
-                        console.log(`[Bot Action] Reacted with ${randomReaction}`);
-                    } catch (e) { console.error("Reaction failed:", e); }
-                    return; 
-                }
-                
-                if (action === 'MESSAGE') {
-                    const messageToSendToAI = (fullUserMessage || "The user sent media.") + attachmentDescription;
-                    
-                    try {
-                        // Smart Typing Indicator
-                        const typingStartDelay = Math.random() * 1000; 
-                        const typingPromise = new Promise(async (resolve) => {
-                            await new Promise(r => setTimeout(r, typingStartDelay));
-                            api.sendTypingIndicator(threadID, (e) => { if (e) console.error(e); });
-                            resolve();
-                        });
-                        
-                        const aiCallPromise = chat.sendMessage({ message: messageToSendToAI });
-                        const [_, response] = await Promise.all([typingPromise, aiCallPromise]); 
-                        const aiReply = response.text.trim();
-
-                        // Final Typing Delay
-                        const typingTime = aiReply.length * RISK_MITIGATION.TYPING_SPEED_PER_CHAR_MS + Math.random() * (aiReply.length * RISK_MITIGATION.MAX_TYPING_FLUCTUATION_MS);
-                        await new Promise(r => setTimeout(r, typingTime));
-                        
-                        // Tagging Logic: 10% chance OR if in a group chat
-                        const shouldTag = Math.random() < 0.1 || threadID !== senderID;
-                        
-                        if (shouldTag) {
-                            sendTaggedMessage(api, aiReply, threadID, senderID, senderName);
-                            console.log(`[Bot Reply] Sent and TAGGED ${senderName}.`);
-                        } else {
-                            api.sendMessage(aiReply, threadID);
-                            console.log(`[Bot Reply] Sent standard message.`);
-                        }
-
-                        // Update persistence
-                        persistedHistory[threadID] = await chat.getHistory();
-                        saveHistory();
-
-                    } catch (aiError) {
-                        console.error("Gemini API Error:", aiError);
-                        api.sendMessage("Ugh, my internet is glitching rn. Totes can't connect!", threadID);
-                    }
-                }
-
-                if (action === 'IGNORE') {
-                    console.log(`[Bot Action] Ignored message (Simulating human pause/disinterest).`);
-                    // Update persistence: Log full context to history
-                    await chat.sendMessage({ message: fullUserMessage + attachmentDescription });
-                    persistedHistory[threadID] = await chat.getHistory();
-                    saveHistory();
-                }
-
-            } else {
-                console.log(`[Ignored] Message not about ${BOT_NAME} or direct, skipping.`);
-            }
+        if (event.type === "message") {
+             const threadID = event.threadID;
+             const queue = getThreadQueue(threadID);
+             queue.push(event, (err) => {
+                 if(err) {
+                     console.error(`[Queue Error - Push] Thread ${threadID}:`, err);
+                 }
+             });
+             console.log(`[Queued] Message from ${event.senderID} added to queue for thread ${threadID}. Queue length: ${queue.length()}`);
+        } else {
+            console.log(`[Event] Non-message event '${event.type}' received in thread ${event.threadID || 'N/A'}.`);
         }
     });
 });
