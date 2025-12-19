@@ -1,7 +1,7 @@
 const fs = require('fs');
 const { GoogleGenAI } = require('@google/genai');
 const dotenv = require('dotenv');
-const { login } = require("@geraldmaxbukutu-debug/fca-unofficial"); 
+const { login } = require("@dongdev/fca-unofficial"); 
 
 dotenv.config();
 
